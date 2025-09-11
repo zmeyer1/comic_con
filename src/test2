@@ -1,0 +1,76 @@
+class HandClassifier:
+    def __init__(self, data_file):
+        # node init is handled in main()
+        self.detector = detect_hand.HandDetector(num_hands=1)
+        self.last_stable_label = ""
+        self.traj_pub = rospy.Publisher("/quori/joint_trajectory_controller/command", JointTrajectory, queue_size=10)
+        with open(data_file, 'rb') as file:
+            self.angles, self.labels = pickle.load(file)
+        self.gen_initial_embeddings()
+        # Load Whisper model for offline/local transcription
+        
+
+    def gen_initial_embeddings(self, n_components=7):
+        self.scaler = StandardScaler()
+        scaled_data = self.scaler.fit_transform(self.angles)
+        self.pca = PCA(n_components=n_components)
+        self.pca.fit(scaled_data)
+        self.embeddings = self.pca.transform(scaled_data)
+    bridge = CvBridge()
+    def dist(self, a, b):
+        return np.sum(np.square(a - b))
+
+    def get_label(self, embedding, k=5):
+        rpq = ReversePriorityQueue()
+        for i, emb in enumerate(self.embeddings):
+            rpq.insert((self.dist(emb, embedding), self.labels[i]))
+
+        neighbors = {}
+        distances = []
+        for _ in range(k):
+            distance, label = rpq.delete()
+            distances.append(distance)
+            neighbors[label] = neighbors.get(label, 0) + 1
+
+        max_count = 0
+        label = None
+        for k, v in neighbors.items():
+            if v > max_count:
+                max_count = v
+                label = k
+        return label, distances
+
+
+
+    def classify(self, im, is_bgr=True, display=False, stable_threshold=10.0):
+        hands_found = self.detector.detect(im, is_bgr)
+        if not getattr(hands_found, "multi_hand_landmarks", None):
+            # No hands detected -> return None with infinite distance
+            return "None", np.inf
+
+        # Evaluate all hands and pick the candidate with smallest mean distance
+        best_candidate = "None"
+        best_mean_distance = np.inf
+        for hand in hands_found.multi_hand_landmarks:
+            angle_vec = detect_hand.generate_angle_vector(hand)
+            embedding = self.pca.transform(self.scaler.transform(angle_vec.reshape(1, -1)))
+            candidate_label, dists = self.get_label(embedding)
+            candidate_mean = float(np.mean(dists))
+            if candidate_mean < best_mean_distance:
+                best_mean_distance = candidate_mean
+                best_candidate = candidate_label
+
+        # Stability logic: only commit to the new label if it's below the threshold,
+        # otherwise keep the last stable label (or "None" if none yet).
+        if best_candidate == self.last_stable_label:
+            out_label = best_candidate
+        else:
+            if best_mean_distance <= stable_threshold:
+                self.last_stable_label = best_candidate
+                out_label = best_candidate
+            else:
+                out_label = self.last_stable_label if self.last_stable_label else "None"
+
+        if display:
+            detect_hand.draw_landmarks_on_image(im, hands_found)
+        return out_label, best_mean_distance

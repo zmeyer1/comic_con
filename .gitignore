@@ -1,0 +1,8 @@
+# .gitignore
+venv/
+env/
+STR/.venv
+hand_signs
+*.pyc
+__pycache__/
+
